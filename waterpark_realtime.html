@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>워터파크 비상 호출 시스템 v2</title>
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, push, onValue, remove, serverTimestamp, onChildAdded, off }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ============================================================
+  //  🔧 Firebase 설정 - 아래 값을 본인의 Firebase 프로젝트로 교체!
+  //  1. https://console.firebase.google.com 접속
+  //  2. 새 프로젝트 생성 → Realtime Database 활성화
+  //  3. 프로젝트 설정 → 웹앱 추가 → 아래 설정값 복사붙여넣기
+  // ============================================================
+  const firebaseConfig = {
+    apiKey:            "YOUR_API_KEY",
+    authDomain:        "YOUR_PROJECT.firebaseapp.com",
+    databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+    projectId:         "YOUR_PROJECT",
+    storageBucket:     "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId:             "YOUR_APP_ID"
+  };
+  // ============================================================
+
+  let app, db;
+  let alertsRef, activeRef, locationsRef;
+  let isFirebaseReady = false;
+
+  window._fbInit = async function() {
+    try {
+      app = initializeApp(firebaseConfig);
+      db  = getDatabase(app);
+      alertsRef    = ref(db, 'alerts');
+      activeRef    = ref(db, 'activeAlerts');
+      locationsRef = ref(db, 'locations');
+      isFirebaseReady = true;
+      window._fbReady = true;
+      document.getElementById('conn-badge').textContent = '🟢 실시간 연결됨';
+      document.getElementById('conn-badge').style.color = '#00C851';
+      console.log('[Firebase] Connected');
+      startListeners();
+    } catch(e) {
+      console.warn('[Firebase] Error:', e.message);
+      window._fbReady = false;
+      document.getElementById('conn-badge').textContent = '🔴 오프라인 모드';
+      document.getElementById('conn-badge').style.color = '#ff4444';
+    }
+  };
+
+  // ---- Send alert to Firebase ----
+  window._fbSendAlert = async function(payload) {
+    if (!isFirebaseReady) return false;
+    try {
+      // Push to alert log
+      await push(alertsRef, { ...payload, ts: serverTimestamp() });
+      // Set/update active alert for location
+      await set(ref(db, `activeAlerts/${payload.locId}`), {
+        type: payload.type,
+        locName: payload.locName,
+        reporter: payload.reporter,
+        ts: serverTimestamp()
+      });
+      return true;
+    } catch(e) { console.warn('[Firebase] Send error:', e); return false; }
+  };
+
+  // ---- Resolve (clear) active alert ----
+  window._fbResolve = async function(locId) {
+    if (!isFirebaseReady) return false;
+    try {
+      await remove(ref(db, `activeAlerts/${locId}`));
+      return true;
+    } catch(e) { return false; }
+  };
+
+  // ---- Save locations ----
+  window._fbSaveLocations = async function(locs) {
+    if (!isFirebaseReady) return false;
+    try {
+      await set(locationsRef, locs);
+      return true;
+    } catch(e) { return false; }
+  };
+
+  // ---- Listeners ----
+  function startListeners() {
+    // Listen to activeAlerts changes → update UI for ALL users
+    onValue(activeRef, (snap) => {
+      const data = snap.val() || {};
+      window._activeAlertsFromDB = data;
+      if (window._onActiveAlertsUpdate) window._onActiveAlertsUpdate(data);
+    });
+
+    // Listen to NEW alerts → trigger alarm on all devices
+    let first = true;
+    onChildAdded(alertsRef, (snap) => {
+      if (first) { first = false; return; } // Skip initial load
+      const alert = snap.val();
+      if (window._onNewAlertReceived) window._onNewAlertReceived(alert);
+    });
+
+    // Listen to locations changes
+    onValue(locationsRef, (snap) => {
+      const data = snap.val();
+      if (data && window._onLocationsUpdate) window._onLocationsUpdate(data);
+    });
+  }
+</script>
+
+<style>
+:root {
+  --red:      #FF1414;
+  --bg:       #0D0F1A;
+  --card:     #141627;
+  --card2:    #1C1F35;
+  --yellow:   #FFD600;
+  --blue:     #0A2550;
+  --teal:     #00C9B1;
+  --white:    #EEF2FF;
+  --green:    #00C851;
+  --muted:    #5A607A;
+}
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; }
+body {
+  font-family: 'Noto Sans KR', sans-serif;
+  background: var(--bg);
+  color: var(--white);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ─── SCREENS ─── */
+.screen { display:none; min-height:100vh; flex-direction:column; }
+.screen.active { display:flex; }
+
+/* ─── SETUP SCREEN ─── */
+#screen-setup {
+  background: radial-gradient(ellipse at 30% 20%, #1a0a2e 0%, #0D0F1A 60%);
+  align-items: center; justify-content: center;
+  padding: 24px;
+}
+.setup-card {
+  width:100%; max-width:400px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,20,20,0.25);
+  border-radius: 20px;
+  padding: 36px 28px;
+}
+.setup-logo {
+  text-align:center; margin-bottom:24px;
+}
+.setup-logo .emblem {
+  width:72px; height:72px; border-radius:50%;
+  background: linear-gradient(135deg, #c00 0%, #600 100%);
+  margin: 0 auto 12px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:34px;
+  box-shadow: 0 0 40px rgba(255,0,0,0.4);
+}
+.setup-logo h1 { font-family:'Black Han Sans'; font-size:22px; }
+.setup-logo p { font-size:12px; color:var(--muted); margin-top:4px; }
+
+.setup-tabs { display:flex; margin-bottom:20px; gap:8px; }
+.setup-tab {
+  flex:1; padding:10px;
+  border:none; border-radius:8px; cursor:pointer;
+  font-family:'Black Han Sans'; font-size:13px;
+  background: rgba(255,255,255,0.06); color:var(--muted);
+  transition:all 0.2s;
+}
+.setup-tab.active { background:var(--red); color:white; }
+
+.setup-pane { display:none; }
+.setup-pane.active { display:block; }
+
+.field { margin-bottom:14px; }
+.field label { font-size:11px; color:var(--muted); display:block; margin-bottom:5px; font-weight:700; letter-spacing:1px; }
+.field input, .field select, .field textarea {
+  width:100%;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius:9px; padding:11px 14px;
+  color:var(--white); font-size:14px;
+  font-family:'Noto Sans KR'; outline:none;
+  transition:border-color 0.2s;
+}
+.field input:focus, .field select:focus { border-color:var(--yellow); }
+.field select option { background:#1C1F35; }
+.field textarea { resize:vertical; min-height:80px; font-size:12px; line-height:1.6; }
+
+.firebase-hint {
+  background: rgba(255,214,0,0.08);
+  border: 1px solid rgba(255,214,0,0.2);
+  border-radius:8px; padding:10px 12px;
+  font-size:11px; color:#ccc; line-height:1.7;
+  margin-bottom:14px;
+}
+.firebase-hint a { color:var(--yellow); }
+
+.btn-enter {
+  width:100%; padding:15px;
+  background: var(--red);
+  border:none; border-radius:10px; color:white;
+  font-family:'Black Han Sans'; font-size:19px;
+  cursor:pointer; letter-spacing:2px;
+  transition:all 0.15s;
+  box-shadow: 0 4px 20px rgba(255,20,20,0.4);
+}
+.btn-enter:active { transform:scale(0.97); }
+
+/* ─── HEADER ─── */
+.header {
+  background: linear-gradient(90deg, #08091a 0%, #12152e 100%);
+  padding: 11px 14px;
+  display:flex; align-items:center; justify-content:space-between;
+  border-bottom: 2px solid rgba(255,20,20,0.5);
+  position:sticky; top:0; z-index:100;
+  flex-shrink:0;
+}
+.header-left { display:flex; align-items:center; gap:8px; }
+.header-logo { font-family:'Black Han Sans'; font-size:17px; }
+#conn-badge { font-size:11px; font-weight:700; transition:color 0.3s; }
+
+/* ─── MAIN ─── */
+#screen-main { background:var(--bg); }
+
+.user-bar {
+  background: rgba(255,255,255,0.03);
+  padding:9px 14px;
+  display:flex; align-items:center; justify-content:space-between;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+  font-size:12px; flex-shrink:0;
+}
+.zone-pill {
+  background:var(--blue);
+  padding:4px 10px; border-radius:20px;
+  font-weight:700; font-size:11px; color:#7eb8ff;
+}
+
+.scroll-body { flex:1; overflow-y:auto; padding-bottom:8px; }
+
+.sec-label {
+  font-family:'Black Han Sans'; font-size:12px;
+  color:var(--muted); letter-spacing:2px;
+  padding:14px 14px 6px;
+}
+
+/* ─── ACTIVE ALERTS BANNER ─── */
+#active-banner {
+  display:none;
+  margin:8px 14px 0;
+  border-radius:12px; overflow:hidden;
+}
+.banner-item {
+  padding:12px 14px;
+  display:flex; align-items:center; gap:10px;
+  animation: slide-in 0.3s ease;
+}
+.banner-item.red { background: rgba(255,20,20,0.2); border:1px solid rgba(255,20,20,0.4); border-radius:10px; margin-bottom:6px; }
+.banner-item.black { background: rgba(100,100,100,0.2); border:1px solid rgba(150,150,150,0.3); border-radius:10px; margin-bottom:6px; }
+@keyframes slide-in { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:translateY(0); } }
+.banner-type { font-family:'Black Han Sans'; font-size:12px; padding:3px 8px; border-radius:6px; white-space:nowrap; }
+.red .banner-type { background:var(--red); color:white; }
+.black .banner-type { background:#555; color:white; }
+.banner-info { flex:1; }
+.banner-loc { font-weight:700; font-size:13px; }
+.banner-sub { font-size:11px; color:#aaa; }
+.btn-resolve {
+  background: rgba(0,200,81,0.2);
+  border:1px solid rgba(0,200,81,0.4);
+  border-radius:7px; padding:5px 10px;
+  color:var(--green); font-size:11px; font-weight:700;
+  cursor:pointer; white-space:nowrap;
+}
+
+/* ─── LOCATION GRID ─── */
+.loc-grid {
+  display:grid; grid-template-columns:repeat(2,1fr);
+  gap:9px; padding:0 14px 12px;
+}
+.loc-btn {
+  background:var(--card2);
+  border:2px solid rgba(255,255,255,0.09);
+  border-radius:12px; padding:14px 10px;
+  cursor:pointer; text-align:center;
+  transition:all 0.15s;
+}
+.loc-btn:active { transform:scale(0.96); }
+.loc-btn.selected { border-color:var(--yellow); background:rgba(255,214,0,0.1); }
+.loc-btn.alerting-red { border-color:var(--red); background:rgba(255,20,20,0.15); animation:border-pulse-red 1s infinite; }
+.loc-btn.alerting-black { border-color:#888; background:rgba(100,100,100,0.15); }
+@keyframes border-pulse-red {
+  0%,100% { box-shadow:0 0 0 0 rgba(255,20,20,0.6); }
+  50% { box-shadow:0 0 0 8px rgba(255,20,20,0); }
+}
+.loc-num { font-family:'Black Han Sans'; font-size:26px; color:var(--yellow); }
+.loc-name { font-size:12px; font-weight:700; margin-top:3px; }
+.loc-status { font-size:10px; margin-top:4px; }
+
+/* ─── ALERT BUTTONS ─── */
+.alert-area { padding:0 14px 10px; }
+.alert-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
+.abtn {
+  border:none; border-radius:14px; padding:20px 10px;
+  cursor:pointer; transition:all 0.15s; position:relative; overflow:hidden;
+}
+.abtn:active { transform:scale(0.95); }
+.abtn-black {
+  background:linear-gradient(135deg,#2a2b3d 0%,#111 100%);
+  border:3px solid #4a4a5a;
+}
+.abtn-red {
+  background:linear-gradient(135deg,#8b0000 0%,#500 100%);
+  border:3px solid var(--red);
+  box-shadow:0 4px 24px rgba(255,20,20,0.45);
+}
+.abtn-red:disabled, .abtn-black:disabled { opacity:0.4; cursor:not-allowed; }
+.abtn .ai { font-size:34px; display:block; margin-bottom:6px; }
+.abtn .al { font-family:'Black Han Sans'; font-size:20px; letter-spacing:1px; }
+.abtn .ad { font-size:10px; color:rgba(255,255,255,0.6); margin-top:5px; display:block; line-height:1.5; font-family:'Noto Sans KR'; }
+.abtn-red .ad { color:rgba(255,180,180,0.8); }
+
+/* ─── MAP ─── */
+#screen-map { background:var(--bg); }
+.map-wrap { padding:12px; flex:1; overflow-y:auto; }
+.map-frame {
+  position:relative; border-radius:12px; overflow:hidden;
+  border:2px solid rgba(255,255,255,0.08);
+  background:#0a1520; margin-bottom:12px;
+}
+.map-img { width:100%; display:block; opacity:0.88; }
+.map-marker {
+  position:absolute; transform:translate(-50%,-50%);
+  cursor:pointer; z-index:10;
+}
+.marker-dot {
+  width:34px; height:34px; border-radius:50%;
+  background:rgba(20,22,39,0.92);
+  border:3px solid rgba(255,255,255,0.5);
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Black Han Sans'; font-size:13px; color:white;
+  box-shadow:0 2px 10px rgba(0,0,0,0.6);
+  transition:all 0.3s;
+}
+.map-marker.active-black .marker-dot { background:#333; border-color:#bbb; animation:mk-black 1.2s infinite; box-shadow:0 0 20px rgba(200,200,200,0.6); }
+.map-marker.active-red   .marker-dot { background:var(--red); border-color:#ff8888; animation:mk-red 0.7s infinite; box-shadow:0 0 30px rgba(255,20,20,1); }
+@keyframes mk-black { 0%,100%{box-shadow:0 0 0 0 rgba(200,200,200,0.7)} 50%{box-shadow:0 0 0 10px rgba(200,200,200,0)} }
+@keyframes mk-red   { 0%,100%{box-shadow:0 0 0 0 rgba(255,20,20,0.9);transform:translate(-50%,-50%) scale(1)}
+                       50%{box-shadow:0 0 0 14px rgba(255,20,20,0);transform:translate(-50%,-50%) scale(1.12)} }
+.marker-lbl {
+  position:absolute; top:37px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.85); color:white;
+  font-size:9px; font-weight:700; white-space:nowrap;
+  padding:2px 6px; border-radius:4px; pointer-events:none;
+}
+
+.log-section { padding:0 12px 80px; }
+.log-header { font-family:'Black Han Sans'; font-size:13px; color:var(--muted); letter-spacing:2px; margin-bottom:8px; }
+.log-item {
+  background:var(--card);
+  border-radius:10px; padding:11px 13px;
+  margin-bottom:7px; border-left:4px solid #333;
+  display:flex; align-items:center; gap:10px;
+  animation:fade-in 0.3s ease;
+}
+@keyframes fade-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+.log-item.lr { border-left-color:var(--red); }
+.log-item.lb { border-left-color:#666; }
+.log-badge { font-family:'Black Han Sans'; font-size:10px; padding:3px 7px; border-radius:5px; white-space:nowrap; }
+.lr .log-badge { background:var(--red); color:white; }
+.lb .log-badge { background:#555; color:white; }
+.log-text { flex:1; }
+.log-loc { font-weight:700; font-size:13px; }
+.log-who { font-size:10px; color:#777; margin-top:1px; }
+.log-t { font-size:10px; color:#555; white-space:nowrap; }
+.empty-log { text-align:center; color:#444; font-size:13px; padding:24px; }
+
+/* ─── ADMIN ─── */
+#screen-admin { background:var(--bg); overflow-y:auto; }
+.adm-body { padding:12px; padding-bottom:80px; }
+.adm-card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:12px; border:1px solid rgba(255,255,255,0.06); }
+.adm-card h3 { font-family:'Black Han Sans'; font-size:15px; color:var(--yellow); border-bottom:1px solid rgba(255,214,0,0.15); padding-bottom:8px; margin-bottom:14px; }
+.edit-row { display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+.num-badge { background:var(--blue); width:30px; height:30px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-family:'Black Han Sans'; font-size:14px; color:var(--yellow); flex-shrink:0; }
+.edit-inp {
+  flex:1; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
+  border-radius:8px; padding:8px 11px; color:var(--white); font-family:'Noto Sans KR'; font-size:13px; outline:none;
+}
+.edit-inp:focus { border-color:var(--yellow); }
+.btn-save { width:100%; padding:13px; background:var(--blue); border:none; border-radius:10px; color:white; font-family:'Black Han Sans'; font-size:17px; cursor:pointer; letter-spacing:2px; margin-top:4px; }
+.btn-save:active { background:#0a1e40; }
+.stat-row { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.stat-box { background:var(--card2); border-radius:10px; padding:12px 8px; text-align:center; }
+.stat-num { font-family:'Black Han Sans'; font-size:26px; }
+.stat-lbl { font-size:10px; color:var(--muted); margin-top:2px; }
+.stat-box.sr .stat-num { color:var(--red); }
+.stat-box.sb .stat-num { color:#aaa; }
+.stat-box.st .stat-num { color:var(--teal); }
+.btn-test-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.btn-test { border:none; border-radius:10px; padding:13px; cursor:pointer; font-family:'Black Han Sans'; font-size:14px; }
+.btn-test.bt-black { background:#333; color:white; }
+.btn-test.bt-red   { background:var(--red); color:white; }
+.btn-logout { width:100%; padding:13px; background:rgba(255,20,20,0.15); border:1px solid rgba(255,20,20,0.3); border-radius:10px; color:var(--red); font-family:'Black Han Sans'; font-size:17px; cursor:pointer; letter-spacing:2px; margin-top:4px; }
+
+/* ─── BOTTOM NAV ─── */
+.bnav {
+  display:flex; background:rgba(8,9,20,0.97);
+  border-top:2px solid rgba(255,255,255,0.07);
+  padding:8px 0 max(8px, env(safe-area-inset-bottom));
+  position:sticky; bottom:0; z-index:50; flex-shrink:0;
+}
+.bnav-btn {
+  flex:1; display:flex; flex-direction:column; align-items:center; gap:3px;
+  background:none; border:none; color:var(--muted);
+  font-family:'Noto Sans KR'; font-size:10px; font-weight:700;
+  cursor:pointer; padding:7px 4px; transition:color 0.2s; letter-spacing:0.5px;
+}
+.bnav-btn .ni { font-size:21px; }
+.bnav-btn.active { color:var(--yellow); }
+
+/* ─── CONFIRM MODAL ─── */
+#confirm-modal {
+  display:none; position:fixed; inset:0; z-index:8000;
+  background:rgba(0,0,0,0.88); align-items:center; justify-content:center; padding:24px;
+}
+#confirm-modal.show { display:flex; }
+.cm-box {
+  background:var(--card2); border-radius:18px; padding:28px 22px;
+  width:100%; max-width:320px; text-align:center;
+  border:1px solid rgba(255,255,255,0.1);
+}
+.cm-icon { font-size:50px; margin-bottom:12px; }
+.cm-title { font-family:'Black Han Sans'; font-size:22px; margin-bottom:8px; }
+.cm-desc { font-size:13px; color:#bbb; line-height:1.7; margin-bottom:22px; white-space:pre-line; }
+.cm-btns { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.cm-cancel { padding:14px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.15); border-radius:10px; color:white; font-family:'Black Han Sans'; font-size:15px; cursor:pointer; }
+.cm-ok { padding:14px; border:none; border-radius:10px; color:white; font-family:'Black Han Sans'; font-size:15px; cursor:pointer; }
+.cm-ok.r { background:var(--red); }
+.cm-ok.b { background:#555; }
+
+/* ─── ALERT OVERLAY ─── */
+#alert-overlay {
+  display:none; position:fixed; inset:0; z-index:9999;
+  flex-direction:column; align-items:center; justify-content:center;
+  text-align:center; padding:24px;
+}
+#alert-overlay.show { display:flex; }
+#alert-overlay.ov-red { background:rgba(160,0,0,0.97); animation:flash 0.35s 4; }
+#alert-overlay.ov-black { background:rgba(15,15,15,0.98); }
+@keyframes flash { 0%,100%{background:rgba(160,0,0,0.97)} 50%{background:rgba(255,40,40,1)} }
+.ov-badge { font-family:'Black Han Sans'; font-size:72px; letter-spacing:4px; animation:ov-pulse 0.7s infinite; text-shadow:0 0 60px rgba(255,255,255,0.4); }
+@keyframes ov-pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
+.ov-loc { font-family:'Black Han Sans'; font-size:34px; color:var(--yellow); margin:8px 0 4px; }
+.ov-time { font-size:13px; color:rgba(255,255,255,0.5); margin-bottom:8px; }
+.ov-who { font-size:14px; color:rgba(255,255,255,0.7); margin-bottom:20px; }
+.ov-desc { font-size:17px; line-height:1.7; margin-bottom:32px; max-width:300px; }
+.ov-close { background:white; color:#111; border:none; border-radius:13px; padding:16px 44px; font-family:'Black Han Sans'; font-size:20px; cursor:pointer; box-shadow:0 4px 24px rgba(0,0,0,0.5); letter-spacing:2px; }
+.ov-self { font-size:11px; color:rgba(255,255,255,0.4); margin-top:14px; }
+
+/* ─── FIREBASE SETUP BANNER ─── */
+#fb-setup-banner {
+  background:rgba(255,214,0,0.1); border:1px solid rgba(255,214,0,0.25);
+  border-radius:10px; margin:10px 14px; padding:12px;
+  font-size:12px; color:#ddd; line-height:1.8; display:none;
+}
+#fb-setup-banner a { color:var(--yellow); }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     SETUP / LOGIN
+════════════════════════════════════════════ -->
+<div id="screen-setup" class="screen active">
+  <div class="setup-card">
+    <div class="setup-logo">
+      <div class="emblem">🚨</div>
+      <h1>비상 호출 시스템</h1>
+      <p>워터파크 안전 관리자 전용 · 실시간 동기화</p>
+    </div>
+
+    <div class="setup-tabs">
+      <button class="setup-tab active" onclick="switchTab('login')">👤 로그인</button>
+      <button class="setup-tab" onclick="switchTab('firebase')">🔥 Firebase 설정</button>
+    </div>
+
+    <!-- LOGIN PANE -->
+    <div class="setup-pane active" id="pane-login">
+      <div class="field">
+        <label>이름</label>
+        <input id="inp-name" type="text" placeholder="홍길동" />
+      </div>
+      <div class="field">
+        <label>담당 구역</label>
+        <select id="inp-zone">
+          <option value="">-- 구역 선택 --</option>
+        </select>
+      </div>
+      <button class="btn-enter" onclick="doLogin()">입장하기 →</button>
+    </div>
+
+    <!-- FIREBASE PANE -->
+    <div class="setup-pane" id="pane-firebase">
+      <div class="firebase-hint">
+        📌 <strong>Firebase 설정 방법</strong><br>
+        1. <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> 에서 새 프로젝트 생성<br>
+        2. <strong>빌드 → Realtime Database</strong> 활성화 (테스트 모드)<br>
+        3. 프로젝트 설정 → 웹앱(&#60;/&#62;) 추가 → 설정값 복사<br>
+        4. 아래에 설정값 붙여넣기 후 저장
+      </div>
+      <div class="field">
+        <label>Firebase Config (JSON)</label>
+        <textarea id="inp-fb-config" placeholder='{"apiKey":"...","authDomain":"...","databaseURL":"https://...","projectId":"...","appId":"..."}'></textarea>
+      </div>
+      <button class="btn-enter" style="background:#1a6b3a;" onclick="saveFbConfig()">🔥 Firebase 설정 저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     MAIN (ALERT SEND)
+════════════════════════════════════════════ -->
+<div id="screen-main" class="screen">
+  <div class="header">
+    <div class="header-left">
+      <span style="font-size:20px;">🚨</span>
+      <span class="header-logo">비상 호출</span>
+    </div>
+    <span id="conn-badge" style="font-size:11px;color:#ff4444;">🔴 연결 중...</span>
+  </div>
+
+  <div class="user-bar">
+    <span id="disp-name">근무자</span>
+    <span class="zone-pill" id="disp-zone">구역</span>
+  </div>
+
+  <div id="fb-setup-banner">
+    ⚠️ <strong>Firebase 미연결 상태입니다.</strong><br>
+    현재는 <strong>오프라인 단독 모드</strong>로 동작합니다. 전 직원에게 전파하려면
+    <strong>설정 탭 → Firebase 설정</strong>을 완료하세요.
+  </div>
+
+  <div class="scroll-body">
+    <!-- Active alerts banner -->
+    <div id="active-banner"></div>
+
+    <div class="sec-label">📍 발생 위치 선택</div>
+    <div class="loc-grid" id="loc-grid"></div>
+
+    <div class="sec-label">⚡ 상황 유형 선택</div>
+    <div class="alert-area">
+      <div class="alert-row">
+        <button class="abtn abtn-black" onclick="openConfirm('black')">
+          <span class="ai">🦺</span>
+          <span class="al">블랙 상황</span>
+          <span class="ad">의식 있음<br>골절·타박·부상</span>
+        </button>
+        <button class="abtn abtn-red" onclick="openConfirm('red')">
+          <span class="ai">💔</span>
+          <span class="al">레드 상황</span>
+          <span class="ad">의식 없음<br>익수·심정지 즉각응급</span>
+        </button>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:11px;color:#444;padding:8px 0 16px;">
+      * 발송 시 모든 근무자 기기에 경보음 + 진동 전파
+    </div>
+  </div>
+
+  <div class="bnav">
+    <button class="bnav-btn active" onclick="showTab('main')"><span class="ni">🚨</span>호출</button>
+    <button class="bnav-btn"        onclick="showTab('map')"><span class="ni">🗺️</span>지도</button>
+    <button class="bnav-btn"        onclick="showTab('admin')"><span class="ni">⚙️</span>설정</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     MAP
+════════════════════════════════════════════ -->
+<div id="screen-map" class="screen">
+  <div class="header">
+    <div class="header-left"><span style="font-size:20px;">🗺️</span><span class="header-logo">위치 현황</span></div>
+    <span id="conn-badge-map" style="font-size:11px;color:var(--green);">실시간</span>
+  </div>
+  <div class="map-wrap">
+    <div class="map-frame" id="map-frame">
+      <img class="map-img" id="map-img" src="" alt="워터파크 지도"
+           onerror="this.parentElement.style.minHeight='180px';this.style.display='none'">
+      <!-- markers injected by JS -->
+    </div>
+    <div class="log-section">
+      <div class="log-header">📋 최근 알림 기록</div>
+      <div id="log-list"><div class="empty-log">아직 발생한 상황이 없습니다</div></div>
+    </div>
+  </div>
+  <div class="bnav">
+    <button class="bnav-btn"        onclick="showTab('main')"><span class="ni">🚨</span>호출</button>
+    <button class="bnav-btn active" onclick="showTab('map')"><span class="ni">🗺️</span>지도</button>
+    <button class="bnav-btn"        onclick="showTab('admin')"><span class="ni">⚙️</span>설정</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     ADMIN
+════════════════════════════════════════════ -->
+<div id="screen-admin" class="screen">
+  <div class="header">
+    <div class="header-left"><span style="font-size:20px;">⚙️</span><span class="header-logo">관리자 설정</span></div>
+  </div>
+  <div class="adm-body">
+    <div class="adm-card">
+      <h3>📍 위치 이름 수정</h3>
+      <div id="adm-loc-list"></div>
+      <button class="btn-save" onclick="adminSaveLocs()">💾 저장 (전체 동기화)</button>
+    </div>
+    <div class="adm-card">
+      <h3>📊 상황 발생 통계</h3>
+      <div class="stat-row">
+        <div class="stat-box sr"><div class="stat-num" id="stat-r">0</div><div class="stat-lbl">레드</div></div>
+        <div class="stat-box sb"><div class="stat-num" id="stat-b">0</div><div class="stat-lbl">블랙</div></div>
+        <div class="stat-box st"><div class="stat-num" id="stat-t">0</div><div class="stat-lbl">전체</div></div>
+      </div>
+    </div>
+    <div class="adm-card">
+      <h3>🔔 경보 테스트 (로컬)</h3>
+      <div class="btn-test-row">
+        <button class="btn-test bt-black" onclick="testAlert('black')">🦺 블랙 테스트</button>
+        <button class="btn-test bt-red"   onclick="testAlert('red')">💔 레드 테스트</button>
+      </div>
+    </div>
+    <div class="adm-card">
+      <h3>🔥 Firebase 재설정</h3>
+      <div class="field">
+        <label>Firebase Config (JSON)</label>
+        <textarea id="adm-fb-config" placeholder='{"apiKey":"...","databaseURL":"..."}'></textarea>
+      </div>
+      <button class="btn-save" style="background:#1a5a30;" onclick="adminSaveFb()">저장 후 재연결</button>
+    </div>
+    <button class="btn-logout" onclick="doLogout()">🚪 로그아웃</button>
+  </div>
+  <div class="bnav">
+    <button class="bnav-btn"        onclick="showTab('main')"><span class="ni">🚨</span>호출</button>
+    <button class="bnav-btn"        onclick="showTab('map')"><span class="ni">🗺️</span>지도</button>
+    <button class="bnav-btn active" onclick="showTab('admin')"><span class="ni">⚙️</span>설정</button>
+  </div>
+</div>
+
+<!-- ─── Confirm Modal ─── -->
+<div id="confirm-modal">
+  <div class="cm-box">
+    <div class="cm-icon" id="cm-icon">⚠️</div>
+    <div class="cm-title" id="cm-title">확인</div>
+    <div class="cm-desc"  id="cm-desc">발송하시겠습니까?</div>
+    <div class="cm-btns">
+      <button class="cm-cancel" onclick="closeConfirm()">취소</button>
+      <button class="cm-ok" id="cm-ok" onclick="doSendAlert()">발송</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Alert Overlay ─── -->
+<div id="alert-overlay">
+  <div class="ov-badge"  id="ov-badge">레드 상황</div>
+  <div class="ov-loc"    id="ov-loc">1번 파도풀</div>
+  <div class="ov-time"   id="ov-time">14:32</div>
+  <div class="ov-who"    id="ov-who">발송: 홍길동</div>
+  <div class="ov-desc"   id="ov-desc">의식 없음 / 즉시 응급처치</div>
+  <button class="ov-close" onclick="closeOverlay()">✅ 확인 / 출동</button>
+  <div class="ov-self"   id="ov-self"></div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     MAIN SCRIPT
+══════════════════════════════════════════════════════ -->
+<script>
+// ─── DEFAULT LOCATIONS ───
+let locations = [
+  { id:1, name:'파도풀',     px:34, py:45 },
+  { id:2, name:'수영장',     px:14, py:40 },
+  { id:3, name:'유수1번',    px:42, py:58 },
+  { id:4, name:'바데풀',     px:74, py:50 },
+  { id:5, name:'남자 사우나',px:60, py:65 },
+  { id:6, name:'여자 사우나',px:57, py:25 },
+  { id:7, name:'써니파크',   px:50, py:85 },
+];
+
+let currentUser = { name:'', zone:'' };
+let pending = { type:null, locId:null };
+let activeAlerts = {};   // locId -> {type, locName, reporter, ts}
+let alertLog = [];
+let statsR=0, statsB=0;
+let selectedLocId = null;
+
+// ─── AUDIO ───
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+function playAlert(type) {
+  try {
+    const ctx = getAudioCtx();
+    const beats = type === 'red' ? [
+      {f:1400,t:0},{f:900,t:280},{f:1400,t:560},{f:900,t:840},{f:1400,t:1120},{f:900,t:1400}
+    ] : [
+      {f:750,t:0},{f:750,t:550},{f:750,t:1100}
+    ];
+    beats.forEach(({f,t}) => {
+      setTimeout(() => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.frequency.value = f;
+        o.type = type === 'red' ? 'square' : 'sine';
+        const dur = type === 'red' ? 0.22 : 0.38;
+        g.gain.setValueAtTime(0.45, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+        o.start(ctx.currentTime);
+        o.stop(ctx.currentTime + dur);
+      }, t);
+    });
+  } catch(e) {}
+}
+function vib(type) {
+  if ('vibrate' in navigator)
+    navigator.vibrate(type==='red' ? [300,80,300,80,300,80,600] : [200,100,200,100,200]);
+}
+
+// ─── FIREBASE HOOKS ───
+window._onActiveAlertsUpdate = function(data) {
+  activeAlerts = data || {};
+  updateActiveBanner();
+  buildLocGrid();
+  rebuildMarkers();
+};
+window._onNewAlertReceived = function(alert) {
+  // Only play sound/show overlay for OTHERS' alerts (not self-sent, which shows immediately)
+  if (alert.reporter !== currentUser.name) {
+    playAlert(alert.type);
+    vib(alert.type);
+    showOverlay(alert.type, alert.locName, alert.time || new Date().toLocaleTimeString('ko-KR'), alert.reporter, false);
+  }
+  appendLog(alert);
+  updateStats();
+};
+window._onLocationsUpdate = function(data) {
+  if (Array.isArray(data)) {
+    locations = data;
+    buildLocGrid();
+    rebuildMarkers();
+    rebuildAdminLocList();
+    rebuildZoneSelect();
+  }
+};
+
+// ─── INIT ───
+function init() {
+  // Load local cache
+  const sl = localStorage.getItem('wp_locs');
+  if (sl) try { locations = JSON.parse(sl); } catch(e){}
+  const sc = localStorage.getItem('wp_stats');
+  if (sc) try { const s=JSON.parse(sc); statsR=s.r||0; statsB=s.b||0; } catch(e){}
+  const sa = localStorage.getItem('wp_active');
+  if (sa) try { activeAlerts = JSON.parse(sa); } catch(e){}
+  const slog = localStorage.getItem('wp_log');
+  if (slog) try { alertLog = JSON.parse(slog); } catch(e){}
+
+  rebuildZoneSelect();
+  buildLocGrid();
+  rebuildAdminLocList();
+  rebuildMarkers();
+  renderLog();
+  updateStats();
+  updateActiveBanner();
+
+  // Load firebase config if saved
+  const fbConf = localStorage.getItem('wp_fb_config');
+  if (fbConf) {
+    document.getElementById('inp-fb-config').value = fbConf;
+    document.getElementById('adm-fb-config').value = fbConf;
+  }
+
+  // Try init firebase after short delay
+  setTimeout(() => {
+    if (window._fbInit) window._fbInit();
+  }, 600);
+}
+
+function rebuildZoneSelect() {
+  const sel = document.getElementById('inp-zone');
+  const prev = sel.value;
+  while (sel.options.length > 1) sel.remove(1);
+  locations.forEach(l => {
+    const o = document.createElement('option');
+    o.value = `${l.id}번 ${l.name}`;
+    o.textContent = `${l.id}번 ${l.name}`;
+    sel.appendChild(o);
+  });
+  const ao = document.createElement('option');
+  ao.value = '관리자/의료진'; ao.textContent = '관리자 / 의료진';
+  sel.appendChild(ao);
+  if (prev) sel.value = prev;
+}
+
+// ─── LOCATION GRID ───
+function buildLocGrid() {
+  const g = document.getElementById('loc-grid');
+  g.innerHTML = '';
+  locations.forEach(l => {
+    const btn = document.createElement('button');
+    btn.className = 'loc-btn';
+    btn.id = `lb-${l.id}`;
+    const a = activeAlerts[l.id];
+    if (a) btn.classList.add(`alerting-${a.type}`);
+    if (selectedLocId === l.id) btn.classList.add('selected');
+    let statusHtml = '';
+    if (a) statusHtml = `<div class="loc-status" style="color:${a.type==='red'?'#ff6666':'#aaa'}">${a.type==='red'?'🔴 레드':'⚫ 블랙'} 상황 중</div>`;
+    btn.innerHTML = `<div class="loc-num">${l.id}번</div><div class="loc-name">${l.name}</div>${statusHtml}`;
+    btn.onclick = () => selectLoc(l.id);
+    g.appendChild(btn);
+  });
+}
+function selectLoc(id) {
+  selectedLocId = id;
+  document.querySelectorAll('.loc-btn').forEach(b => {
+    b.classList.remove('selected');
+    const lid = parseInt(b.id.replace('lb-',''));
+    if (activeAlerts[lid]) {} // keep alerting class
+  });
+  const btn = document.getElementById(`lb-${id}`);
+  if (btn) btn.classList.add('selected');
+  pending.locId = id;
+}
+
+// ─── CONFIRM ───
+function openConfirm(type) {
+  if (!selectedLocId && !pending.locId) { alert('먼저 위치를 선택해주세요!'); return; }
+  if (!pending.locId) pending.locId = selectedLocId;
+  pending.type = type;
+  const loc = locations.find(l => l.id === pending.locId);
+  const locName = `${loc.id}번 ${loc.name}`;
+  const isRed = type === 'red';
+  document.getElementById('cm-icon').textContent = isRed ? '💔' : '🦺';
+  document.getElementById('cm-title').textContent = isRed ? '레드 상황 발송' : '블랙 상황 발송';
+  document.getElementById('cm-title').style.color = isRed ? '#ff4444' : '#aaa';
+  document.getElementById('cm-desc').textContent =
+    `${locName}\n${isRed ? '의식 없음 / 익수·심정지 응급' : '의식 있음 / 부상·골절 응급'}\n\n전 직원 기기에 즉시 전파됩니다.`;
+  const ok = document.getElementById('cm-ok');
+  ok.className = `cm-ok ${isRed?'r':'b'}`;
+  document.getElementById('confirm-modal').classList.add('show');
+}
+function closeConfirm() {
+  document.getElementById('confirm-modal').classList.remove('show');
+}
+
+async function doSendAlert() {
+  closeConfirm();
+  const { type, locId } = pending;
+  if (!type || !locId) return;
+  const loc = locations.find(l => l.id === locId);
+  const locName = `${loc.id}번 ${loc.name}`;
+  const timeStr = new Date().toLocaleTimeString('ko-KR');
+  const payload = { type, locId, locName, reporter: currentUser.name, time: timeStr };
+
+  // Sound + vib
+  playAlert(type);
+  vib(type);
+
+  // Firebase send (or local fallback)
+  let sent = false;
+  if (window._fbReady) {
+    sent = await window._fbSendAlert(payload);
+  }
+
+  if (!sent) {
+    // Offline mode – update local state
+    activeAlerts[locId] = { type, locName, reporter: currentUser.name, ts: Date.now() };
+    localStorage.setItem('wp_active', JSON.stringify(activeAlerts));
+    appendLog(payload);
+    updateStats();
+    updateActiveBanner();
+    buildLocGrid();
+    rebuildMarkers();
+  }
+
+  // Show overlay on sender's device
+  showOverlay(type, locName, timeStr, currentUser.name, true);
+}
+
+// ─── OVERLAY ───
+function showOverlay(type, locName, timeStr, reporter, isSelf) {
+  const ov = document.getElementById('alert-overlay');
+  document.getElementById('ov-badge').textContent = type==='red' ? '🚨 레드 상황 🚨' : '⚠️ 블랙 상황 ⚠️';
+  document.getElementById('ov-loc').textContent = locName;
+  document.getElementById('ov-time').textContent = timeStr;
+  document.getElementById('ov-who').textContent = `발송: ${reporter}`;
+  document.getElementById('ov-desc').textContent = type==='red'
+    ? '의식 없음 / 즉시 응급처치 필요\n해당 위치로 즉시 이동하십시오!'
+    : '의식 있음 / 부상 응급처치 필요\n해당 위치로 이동하십시오.';
+  document.getElementById('ov-self').textContent = isSelf ? '' : '📡 다른 근무자의 호출입니다';
+  ov.className = `show ov-${type}`;
+  ov.style.display = 'flex';
+}
+function closeOverlay() {
+  const ov = document.getElementById('alert-overlay');
+  ov.style.display = 'none'; ov.className = '';
+}
+function testAlert(type) {
+  playAlert(type); vib(type);
+  showOverlay(type, locations[0].id+'번 '+locations[0].name, new Date().toLocaleTimeString('ko-KR'), '테스트', true);
+}
+
+// ─── ACTIVE BANNER ───
+function updateActiveBanner() {
+  const banner = document.getElementById('active-banner');
+  const keys = Object.keys(activeAlerts);
+  if (keys.length === 0) { banner.style.display='none'; banner.innerHTML=''; return; }
+  banner.style.display = 'block';
+  banner.innerHTML = keys.map(k => {
+    const a = activeAlerts[k];
+    return `<div class="banner-item ${a.type}">
+      <span class="banner-type">${a.type==='red'?'🔴 레드':'⚫ 블랙'}</span>
+      <div class="banner-info">
+        <div class="banner-loc">${a.locName}</div>
+        <div class="banner-sub">발송: ${a.reporter||'?'}</div>
+      </div>
+      <button class="btn-resolve" onclick="resolveAlert(${k})">해결 ✓</button>
+    </div>`;
+  }).join('');
+}
+
+async function resolveAlert(locId) {
+  if (!confirm('상황이 해결되었습니까?')) return;
+  if (window._fbReady) await window._fbResolve(locId);
+  delete activeAlerts[locId];
+  localStorage.setItem('wp_active', JSON.stringify(activeAlerts));
+  updateActiveBanner();
+  buildLocGrid();
+  rebuildMarkers();
+}
+
+// ─── LOG ───
+function appendLog(entry) {
+  alertLog.unshift(entry);
+  if (alertLog.length > 60) alertLog = alertLog.slice(0,60);
+  localStorage.setItem('wp_log', JSON.stringify(alertLog));
+  renderLog();
+  if (entry.type==='red') statsR++; else statsB++;
+  localStorage.setItem('wp_stats', JSON.stringify({r:statsR,b:statsB}));
+  updateStats();
+}
+function renderLog() {
+  const el = document.getElementById('log-list');
+  if (alertLog.length===0) { el.innerHTML='<div class="empty-log">아직 발생한 상황이 없습니다</div>'; return; }
+  el.innerHTML = alertLog.slice(0,15).map(e=>`
+    <div class="log-item ${e.type==='red'?'lr':'lb'}">
+      <span class="log-badge">${e.type==='red'?'🔴 레드':'⚫ 블랙'}</span>
+      <div class="log-text">
+        <div class="log-loc">${e.locName}</div>
+        <div class="log-who">발송: ${e.reporter||'?'}</div>
+      </div>
+      <div class="log-t">${e.time||''}</div>
+    </div>`).join('');
+}
+function updateStats() {
+  document.getElementById('stat-r').textContent = statsR;
+  document.getElementById('stat-b').textContent = statsB;
+  document.getElementById('stat-t').textContent = statsR+statsB;
+}
+
+// ─── MAP MARKERS ───
+function rebuildMarkers() {
+  const frame = document.getElementById('map-frame');
+  frame.querySelectorAll('.map-marker').forEach(m=>m.remove());
+  locations.forEach(l => {
+    const m = document.createElement('div');
+    m.className = 'map-marker';
+    m.id = `mk-${l.id}`;
+    m.style.left = l.px+'%';
+    m.style.top  = l.py+'%';
+    const a = activeAlerts[l.id];
+    if (a) m.classList.add(`active-${a.type}`);
+    m.innerHTML = `<div class="marker-dot">${l.id}</div><div class="marker-lbl">${l.name}</div>`;
+    m.onclick = () => selectLoc(l.id);
+    frame.appendChild(m);
+  });
+}
+
+// ─── ADMIN LOCS ───
+function rebuildAdminLocList() {
+  const el = document.getElementById('adm-loc-list');
+  el.innerHTML = locations.map(l=>`
+    <div class="edit-row">
+      <div class="num-badge">${l.id}</div>
+      <input class="edit-inp" id="al-${l.id}" value="${l.name}" />
+    </div>`).join('');
+}
+async function adminSaveLocs() {
+  locations.forEach(l => {
+    const inp = document.getElementById(`al-${l.id}`);
+    if (inp) l.name = inp.value;
+  });
+  localStorage.setItem('wp_locs', JSON.stringify(locations));
+  if (window._fbReady) await window._fbSaveLocations(locations);
+  buildLocGrid(); rebuildMarkers(); rebuildZoneSelect();
+  alert('저장되었습니다!');
+}
+
+// ─── FIREBASE CONFIG ───
+function saveFbConfig() {
+  const v = document.getElementById('inp-fb-config').value.trim();
+  if (!v) { alert('설정값을 입력해주세요'); return; }
+  try { JSON.parse(v); } catch(e) { alert('JSON 형식이 올바르지 않습니다'); return; }
+  localStorage.setItem('wp_fb_config', v);
+  alert('Firebase 설정이 저장되었습니다.\n앱을 다시 시작하면 적용됩니다.');
+}
+function adminSaveFb() {
+  const v = document.getElementById('adm-fb-config').value.trim();
+  if (!v) return;
+  try { JSON.parse(v); } catch(e) { alert('JSON 형식 오류'); return; }
+  localStorage.setItem('wp_fb_config', v);
+  document.getElementById('inp-fb-config').value = v;
+  alert('저장되었습니다. 페이지를 새로고침하면 Firebase에 연결됩니다.');
+}
+
+// ─── NAV / TABS ───
+function showTab(tab) {
+  ['main','map','admin'].forEach(t => {
+    const s = document.getElementById(`screen-${t}`);
+    s.classList.remove('active');
+    // update nav btns
+    s.querySelectorAll('.bnav-btn').forEach((b,i)=>{
+      b.classList.remove('active');
+      if (['main','map','admin'][i]===t) b.classList.add('active');
+    });
+  });
+  document.getElementById(`screen-${tab}`).classList.add('active');
+  if (tab==='map') { rebuildMarkers(); renderLog(); }
+  if (tab==='admin') { rebuildAdminLocList(); updateStats(); }
+}
+function switchTab(tab) {
+  document.querySelectorAll('.setup-tab').forEach((b,i)=>{
+    b.classList.toggle('active', ['login','firebase'][i]===tab);
+  });
+  document.querySelectorAll('.setup-pane').forEach((p,i)=>{
+    p.classList.toggle('active', ['pane-login','pane-firebase'][i]===`pane-${tab}`);
+  });
+}
+
+// ─── LOGIN / LOGOUT ───
+function doLogin() {
+  const name = document.getElementById('inp-name').value.trim();
+  const zone = document.getElementById('inp-zone').value;
+  if (!name) { alert('이름을 입력하세요'); return; }
+  if (!zone) { alert('담당 구역을 선택하세요'); return; }
+  currentUser = { name, zone };
+  document.getElementById('disp-name').textContent = `👤 ${name}`;
+  document.getElementById('disp-zone').textContent = zone;
+  document.getElementById('screen-setup').classList.remove('active');
+  document.getElementById('screen-main').classList.add('active');
+
+  // Show banner if firebase not ready
+  if (!window._fbReady) {
+    document.getElementById('fb-setup-banner').style.display = 'block';
+  }
+}
+function doLogout() {
+  if (!confirm('로그아웃 하시겠습니까?')) return;
+  ['main','map','admin'].forEach(t => document.getElementById(`screen-${t}`).classList.remove('active'));
+  document.getElementById('screen-setup').classList.add('active');
+  switchTab('login');
+}
+
+// ─── FIREBASE DYNAMIC REINIT ───
+// If saved config differs from compiled config, reload with saved one
+(async function tryLoadSavedFbConfig() {
+  await new Promise(r => setTimeout(r, 300));
+  const saved = localStorage.getItem('wp_fb_config');
+  if (!saved) return;
+  try {
+    const cfg = JSON.parse(saved);
+    // Override window._fbInit to use saved config
+    const origInit = window._fbInit;
+    window._fbInit = async function() {
+      try {
+        const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+        const { getDatabase, ref, set, push, onValue, remove, serverTimestamp, onChildAdded }
+          = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+        const app = initializeApp(cfg, 'wpark-'+Date.now());
+        const db  = getDatabase(app);
+        window._db = db;
+        window._fbReady = true;
+        document.getElementById('conn-badge').textContent = '🟢 실시간 연결됨';
+        document.getElementById('conn-badge').style.color = '#00C851';
+        document.getElementById('fb-setup-banner').style.display = 'none';
+
+        const alertsRef    = ref(db, 'alerts');
+        const activeRef    = ref(db, 'activeAlerts');
+        const locationsRef = ref(db, 'locations');
+
+        window._fbSendAlert = async function(payload) {
+          try {
+            await push(alertsRef, { ...payload, ts: serverTimestamp() });
+            await set(ref(db, `activeAlerts/${payload.locId}`), {
+              type: payload.type, locName: payload.locName, reporter: payload.reporter, ts: serverTimestamp()
+            });
+            return true;
+          } catch(e) { return false; }
+        };
+        window._fbResolve = async function(locId) {
+          try { await remove(ref(db, `activeAlerts/${locId}`)); return true; } catch(e) { return false; }
+        };
+        window._fbSaveLocations = async function(locs) {
+          try { await set(locationsRef, locs); return true; } catch(e) { return false; }
+        };
+
+        onValue(activeRef, snap => {
+          activeAlerts = snap.val() || {};
+          updateActiveBanner(); buildLocGrid(); rebuildMarkers();
+        });
+        let first = true;
+        onChildAdded(alertsRef, snap => {
+          if (first) { first=false; return; }
+          const a = snap.val();
+          if (a.reporter !== currentUser.name) {
+            playAlert(a.type); vib(a.type);
+            showOverlay(a.type, a.locName, a.time||'', a.reporter, false);
+          }
+          appendLog(a);
+        });
+        onValue(locationsRef, snap => {
+          const d = snap.val();
+          if (d && Array.isArray(d)) { locations=d; buildLocGrid(); rebuildMarkers(); rebuildAdminLocList(); rebuildZoneSelect(); }
+        });
+      } catch(e) {
+        console.warn('[Firebase saved config error]', e.message);
+        window._fbReady = false;
+        document.getElementById('conn-badge').textContent = '🔴 연결 실패';
+        document.getElementById('conn-badge').style.color = '#ff4444';
+      }
+    };
+  } catch(e) {}
+})();
+
+// ─── START ───
+init();
+</script>
+</body>
+</html>
