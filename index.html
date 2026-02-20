@@ -4,18 +4,45 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>비상 호출</title>
-<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
+
+<!-- ✅ PWA 홈화면 아이콘 설정 -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="비상 호출">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="비상 호출">
 <meta name="theme-color" content="#FF1414">
+
+<!-- 아이콘 (SVG → PNG 변환 없이 인라인 SVG 방식) -->
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23FF1414'/%3E%3Ctext x='96' y='140' font-size='110' text-anchor='middle'%3E%F0%9F%9A%A8%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23FF1414'/%3E%3Ctext x='96' y='140' font-size='110' text-anchor='middle'%3E%F0%9F%9A%A8%3C/text%3E%3C/svg%3E">
 
-④ 수정 완료 후 → 우측 상단 초록색 "변경 사항을 커밋하세요..." 버튼 클릭
-⑤ 팝업에서 "변경 사항 커밋" 클릭
+<!-- PWA 매니페스트 (인라인) -->
+<script>
+  const manifestData = {
+    name: "비상 호출 시스템",
+    short_name: "비상 호출",
+    start_url: "./",
+    display: "standalone",
+    background_color: "#0D0F1A",
+    theme_color: "#FF1414",
+    orientation: "portrait",
+    icons: [
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23FF1414'/%3E%3Ctext x='96' y='140' font-size='110' text-anchor='middle'%3E%F0%9F%9A%A8%3C/text%3E%3C/svg%3E",
+        sizes: "192x192",
+        type: "image/svg+xml"
+      }
+    ]
+  };
+  const blob = new Blob([JSON.stringify(manifestData)], {type:'application/json'});
+  const manifestURL = URL.createObjectURL(blob);
+  const link = document.createElement('link');
+  link.rel = 'manifest'; link.href = manifestURL;
+  document.currentScript.after(link);
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
 
-완료 후 1~2분 기다렸다가 앱을 다시 홈화면에 추가하면 🚨 빨간 사이렌 아이콘으로 바뀝니다! 😊 Sonnet 4.6
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -109,11 +136,24 @@
     });
 
     // Listen to NEW alerts → trigger alarm on all devices
-    let first = true;
-    onChildAdded(alertsRef, (snap) => {
-      if (first) { first = false; return; } // Skip initial load
-      const alert = snap.val();
-      if (window._onNewAlertReceived) window._onNewAlertReceived(alert);
+    // 수정: onChildAdded 타이밍 버그 제거, onValue로 안정적으로 변경
+    let _lastAlertKey = null;
+    let _initDone = false;
+    onValue(alertsRef, (snap) => {
+      const data = snap.val();
+      if (!data) { _initDone = true; return; }
+      const keys = Object.keys(data);
+      const newestKey = keys[keys.length - 1];
+      if (!_initDone) {
+        _lastAlertKey = newestKey;
+        _initDone = true;
+        return;
+      }
+      if (newestKey !== _lastAlertKey) {
+        _lastAlertKey = newestKey;
+        const alert = data[newestKey];
+        if (window._onNewAlertReceived) window._onNewAlertReceived(alert);
+      }
     });
 
     // Listen to locations changes
@@ -753,10 +793,13 @@ window._onActiveAlertsUpdate = function(data) {
   rebuildMarkers();
 };
 window._onNewAlertReceived = function(alert) {
-  // Only play sound/show overlay for OTHERS' alerts (not self-sent, which shows immediately)
-  if (alert.reporter !== currentUser.name) {
-    playAlert(alert.type);
-    vib(alert.type);
+  if (!alert || !alert.type || !alert.locName) return;
+  // 발송자 포함 모든 기기에서 소리+진동+오버레이 표시
+  // (발송자는 doSendAlert에서 이미 보여줬으므로 overlay만 제외)
+  const isSelf = (alert.reporter === currentUser.name);
+  playAlert(alert.type);
+  vib(alert.type);
+  if (!isSelf) {
     showOverlay(alert.type, alert.locName, alert.time || new Date().toLocaleTimeString('ko-KR'), alert.reporter, false);
   }
   appendLog(alert);
@@ -1137,15 +1180,24 @@ function doLogout() {
           activeAlerts = snap.val() || {};
           updateActiveBanner(); buildLocGrid(); rebuildMarkers();
         });
-        let first = true;
-        onChildAdded(alertsRef, snap => {
-          if (first) { first=false; return; }
-          const a = snap.val();
-          if (a.reporter !== currentUser.name) {
-            playAlert(a.type); vib(a.type);
-            showOverlay(a.type, a.locName, a.time||'', a.reporter, false);
+        // 수정: onChildAdded 타이밍 버그 제거, onValue로 안정적으로 변경
+        let _lastKey2 = null;
+        let _init2 = false;
+        onValue(alertsRef, snap2 => {
+          const d2 = snap2.val();
+          if (!d2) { _init2 = true; return; }
+          const ks = Object.keys(d2);
+          const nk = ks[ks.length - 1];
+          if (!_init2) { _lastKey2 = nk; _init2 = true; return; }
+          if (nk !== _lastKey2) {
+            _lastKey2 = nk;
+            const a = d2[nk];
+            if (a.reporter !== currentUser.name) {
+              playAlert(a.type); vib(a.type);
+              showOverlay(a.type, a.locName, a.time||'', a.reporter, false);
+            }
+            appendLog(a);
           }
-          appendLog(a);
         });
         onValue(locationsRef, snap => {
           const d = snap.val();
